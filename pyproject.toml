@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triton-llm-kernels"
+version = "0.1.0"
+description = "Fused Triton kernels for LLM building blocks, tested and benchmarked against PyTorch"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Anetisa" }]
+dependencies = [
+    "torch>=2.1",
+]
+
+[project.urls]
+Repository = "https://github.com/Anetisa/triton-llm-kernels"
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "matplotlib>=3.5"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

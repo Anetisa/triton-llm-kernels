@@ -1,0 +1,5 @@
+# Core: torch bundles Triton on Linux x86_64.
+torch>=2.1
+# Dev / benchmarking:
+pytest>=7
+matplotlib>=3.5
