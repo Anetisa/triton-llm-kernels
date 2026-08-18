@@ -14,7 +14,7 @@ The normalization, positional-encoding and MLP ops inside a transformer are *mem
 |---|:---:|:---:|:---:|:---:|---|
 | **RMSNorm** | ✅ done | ✅ done | ✅ done | ✅ done | LLaMA/Mistral/Qwen norm |
 | RoPE | ✅ done | ✅ done | ✅ done | in progress | rotary position embedding |
-| SwiGLU MLP | planned | planned | | | fused gate·up·SiLU |
+| SwiGLU MLP | ✅ done | ✅ done | ✅ done| in progress | fused gate·up·SiLU |
 | LayerNorm | planned | planned | | | with bias |
 | FlashAttention | planned | planned | | | causal + GQA (headliner) |
 | FP8 GEMM | planned | — | | | Ada-native FP8 (4090+) |
@@ -112,7 +112,7 @@ state.
 - [x] Project scaffold, CI-friendly test harness, benchmark tooling
 - [x] **RMSNorm** forward + backward, tests, benchmark, [write-up](docs/rmsnorm.md)
 - [x] RoPE (rotary embeddings), interleaved + neox layouts
-- [ ] Fused SwiGLU MLP
+- [x] Fused SwiGLU MLP
 - [ ] LayerNorm (with bias) + grouped/locked weight-grad reduction
 - [ ] **FlashAttention**: online-softmax, causal mask, GQA/MQA
 - [ ] FP8 GEMM using Ada-native FP8 tensor cores (RTX 4090+)

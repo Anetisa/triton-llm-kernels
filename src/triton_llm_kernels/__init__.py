@@ -11,6 +11,12 @@ from .rope import (
     rope,
     rope_reference,
 )
+from .swiglu import (
+    SwiGLUMLP,
+    TritonSwiGLU,
+    swiglu,
+    swiglu_reference,
+)
 
 __all__ = [
     "rmsnorm",
@@ -20,6 +26,10 @@ __all__ = [
     "rope_reference",
     "build_rope_cache",
     "TritonRoPE",
+    "swiglu",
+    "swiglu_reference",
+    "TritonSwiGLU",
+    "SwiGLUMLP",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
