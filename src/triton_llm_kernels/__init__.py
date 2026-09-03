@@ -17,6 +17,11 @@ from .swiglu import (
     swiglu,
     swiglu_reference,
 )
+from .layernorm import (
+    TritonLayerNorm,
+    layernorm,
+    layernorm_reference,
+)
 
 __all__ = [
     "rmsnorm",
@@ -30,6 +35,9 @@ __all__ = [
     "swiglu_reference",
     "TritonSwiGLU",
     "SwiGLUMLP",
+    "layernorm",
+    "layernorm_reference",
+    "TritonLayerNorm",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

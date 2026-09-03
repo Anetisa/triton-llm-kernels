@@ -15,7 +15,7 @@ The normalization, positional-encoding and MLP ops inside a transformer are *mem
 | **RMSNorm** | ✅ done | ✅ done | ✅ done | ✅ done | LLaMA/Mistral/Qwen norm |
 | RoPE | ✅ done | ✅ done | ✅ done | ✅ done | rotary position embedding |
 | SwiGLU MLP | ✅ done | ✅ done | ✅ done| ✅ done | fused gate·up·SiLU |
-| LayerNorm | planned | planned | | | with bias |
+| LayerNorm | ✅ done | ✅ done | ✅ done | in progress| with bias |
 | FlashAttention | planned | planned | | | causal + GQA (headliner) |
 | FP8 GEMM | planned | — | | | Ada-native FP8 (4090+) |
 
