@@ -22,6 +22,10 @@ from .layernorm import (
     layernorm,
     layernorm_reference,
 )
+from .flash_attention import (
+    attention_reference,
+    flash_attention_forward,
+)
 
 __all__ = [
     "rmsnorm",
@@ -38,6 +42,8 @@ __all__ = [
     "layernorm",
     "layernorm_reference",
     "TritonLayerNorm",
+    "flash_attention_forward",
+    "attention_reference",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
