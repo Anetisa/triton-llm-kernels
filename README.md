@@ -13,8 +13,8 @@ The normalization, positional-encoding and MLP ops inside a transformer are *mem
 | Kernel | Fwd | Bwd | Correctness test | Benchmark | Notes |
 |---|:---:|:---:|:---:|:---:|---|
 | **RMSNorm** | ✅ done | ✅ done | ✅ done | ✅ done | LLaMA/Mistral/Qwen norm |
-| RoPE | ✅ done | ✅ done | ✅ done | in progress | rotary position embedding |
-| SwiGLU MLP | ✅ done | ✅ done | ✅ done| in progress | fused gate·up·SiLU |
+| RoPE | ✅ done | ✅ done | ✅ done | ✅ done | rotary position embedding |
+| SwiGLU MLP | ✅ done | ✅ done | ✅ done| ✅ done | fused gate·up·SiLU |
 | LayerNorm | planned | planned | | | with bias |
 | FlashAttention | planned | planned | | | causal + GQA (headliner) |
 | FP8 GEMM | planned | — | | | Ada-native FP8 (4090+) |
@@ -30,7 +30,13 @@ GPU's peak — not FLOP/s.
 
 ## Results
 
-Benchmarked on an RTX 4090 (fill in after running `make bench`):
+Benchmarked on an RTX 4090 (fp16). All three kernels reach **~930–940 GB/s at
+large sizes — about 92–93% of the card's ~1008 GB/s peak bandwidth** — matching
+`torch.compile` and beating eager PyTorch by **4–13×**. Since these ops are
+memory-bound, near-peak bandwidth means the kernel is essentially optimal.
+bf16 gives near-identical numbers (plots in [`assets/bf16/`](assets/bf16)).
+
+### RMSNorm
 
 ![RMSNorm benchmark](assets/rmsnorm_bench.png)
 
@@ -38,8 +44,47 @@ Benchmarked on an RTX 4090 (fill in after running `make bench`):
 RMSNorm  |  M=8192  dtype=fp16  GPU=NVIDIA GeForce RTX 4090
 
      N |  eager ms  compile ms  triton ms | triton GB/s  speedup
-------------------------------------------------------------------
-  ...run `python benchmarks/bench_rmsnorm.py` to populate...
+----------------------------------------------------------------
+  1024 |    0.1672      0.0389     0.0395 |       849.0    4.23x
+  2048 |    0.6530      0.0774     0.0761 |       881.6    8.58x
+  3072 |    1.0468      0.1127     0.1120 |       898.6    9.34x
+  4096 |    1.4223      0.1487     0.1464 |       917.2    9.72x
+  5120 |    1.7879      0.1837     0.1811 |       926.5    9.87x
+  6144 |    2.1482      0.2200     0.2168 |       928.8    9.91x
+  8192 |    2.8485      0.2924     0.2866 |       936.7    9.94x
+```
+
+### RoPE
+
+![RoPE benchmark](assets/rope_bench.png)
+
+```
+RoPE  |  B=8 H=32 D=128  dtype=fp16  GPU=NVIDIA GeForce RTX 4090
+
+     S |  eager ms  compile ms  triton ms | triton GB/s  speedup
+----------------------------------------------------------------
+   512 |    0.9151      0.0784     0.0780 |       863.2   11.73x
+  1024 |    1.8899      0.1487     0.1478 |       911.4   12.78x
+  2048 |    3.7725      0.2913     0.2893 |       931.4   13.04x
+  4096 |    7.5642      0.5891     0.5803 |       928.7   13.03x
+  8192 |   15.1447      1.1765     1.1582 |       930.7   13.08x
+```
+
+### SwiGLU
+
+![SwiGLU benchmark](assets/swiglu_bench.png)
+
+```
+SwiGLU activation  |  M=8192  dtype=fp16  GPU=NVIDIA GeForce RTX 4090
+
+  d_ff |  eager ms  compile ms  triton ms | triton GB/s  speedup
+----------------------------------------------------------------
+  2048 |    0.6762      0.1137     0.1133 |       888.4    5.97x
+  4096 |    1.3654      0.2208     0.2205 |       913.3    6.19x
+  5504 |    1.8275      0.2933     0.2934 |       922.1    6.23x
+  8192 |    2.7115      0.4326     0.4326 |       930.7    6.27x
+ 11008 |    3.6366      0.5793     0.5794 |       933.8    6.28x
+ 14336 |    4.7384      0.7482     0.7484 |       941.5    6.33x
 ```
 
 ## Quickstart
@@ -111,8 +156,8 @@ state.
 
 - [x] Project scaffold, CI-friendly test harness, benchmark tooling
 - [x] **RMSNorm** forward + backward, tests, benchmark, [write-up](docs/rmsnorm.md)
-- [x] RoPE (rotary embeddings), interleaved + neox layouts
-- [x] Fused SwiGLU MLP
+- [x] **RoPE** (rotary embeddings) forward + backward, tests, benchmark, [write-up](docs/rope.md)
+- [x] **SwiGLU** fused activation forward + backward, tests, benchmark, [write-up](docs/swiglu.md)
 - [ ] LayerNorm (with bias) + grouped/locked weight-grad reduction
 - [ ] **FlashAttention**: online-softmax, causal mask, GQA/MQA
 - [ ] FP8 GEMM using Ada-native FP8 tensor cores (RTX 4090+)

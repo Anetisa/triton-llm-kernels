@@ -50,7 +50,7 @@ def run(M, hidden_sizes, dtype, provider):
             fn = lambda: rmsnorm_reference(x, w)
         elif provider == "compile":
             compiled = torch.compile(rmsnorm_reference)
-            compiled()  # warm up / trigger compilation outside timing
+            compiled(x, w)  # warm up / trigger compilation outside timing
             fn = lambda: compiled(x, w)
         elif provider == "triton":
             fn = lambda: rmsnorm(x, w)
