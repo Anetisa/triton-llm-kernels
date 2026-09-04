@@ -16,7 +16,7 @@ The normalization, positional-encoding and MLP ops inside a transformer are *mem
 | RoPE | ✅ done | ✅ done | ✅ done | ✅ done | rotary position embedding |
 | SwiGLU MLP | ✅ done | ✅ done | ✅ done| ✅ done | fused gate·up·SiLU |
 | LayerNorm | ✅ done | ✅ done | ✅ done | in progress| with bias |
-| FlashAttention | ✅ done | planned | ✅ done | in progress | causal + GQA (headliner) |
+| FlashAttention | ✅ done | ✅ done | ✅ done | in progress | causal + GQA (headliner) |
 | FP8 GEMM | planned | — | | | Ada-native FP8 (4090+) |
 
 ## Why this is memory-bound (and why fusion wins)

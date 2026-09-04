@@ -16,7 +16,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from triton_llm_kernels import attention_reference, flash_attention_forward
+from triton_llm_kernels import attention_reference, flash_attention, flash_attention_forward
 
 INTERPRET = os.environ.get("TRITON_INTERPRET") == "1"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -104,3 +104,48 @@ def test_forward_matches_sdpa(causal):
     out = flash_attention_forward(q, k, v, causal=causal, block_m=BLOCK, block_n=BLOCK)
     sdpa = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
     torch.testing.assert_close(out, sdpa, atol=2e-4, rtol=2e-4)
+
+
+@requires_cuda
+@pytest.mark.parametrize("B,H,S,D", SHAPES)
+@pytest.mark.parametrize("causal", [True, False])
+def test_backward_matches_reference(B, H, S, D, causal):
+    """dQ, dK, dV from the Triton backward match autograd through the reference."""
+    torch.manual_seed(0)
+    q = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float32, requires_grad=True)
+    k = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float32, requires_grad=True)
+    v = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float32, requires_grad=True)
+    do = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float32)
+
+    flash_attention(q, k, v, causal=causal, block_m=BLOCK, block_n=BLOCK).backward(do)
+    dq_t, dk_t, dv_t = q.grad.detach().clone(), k.grad.detach().clone(), v.grad.detach().clone()
+    q.grad = k.grad = v.grad = None
+
+    attention_reference(q, k, v, causal=causal).backward(do)
+    dq_r, dk_r, dv_r = q.grad.detach(), k.grad.detach(), v.grad.detach()
+
+    torch.testing.assert_close(dq_t, dq_r, atol=2e-4, rtol=2e-4)
+    torch.testing.assert_close(dk_t, dk_r, atol=2e-4, rtol=2e-4)
+    torch.testing.assert_close(dv_t, dv_r, atol=2e-4, rtol=2e-4)
+
+
+@requires_cuda
+def test_backward_matches_sdpa():
+    """Full grads match differentiating PyTorch's scaled_dot_product_attention."""
+    torch.manual_seed(0)
+    B, H, S, D = 2, 4, 128, 64
+    q = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float32, requires_grad=True)
+    k = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float32, requires_grad=True)
+    v = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float32, requires_grad=True)
+    do = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float32)
+
+    flash_attention(q, k, v, causal=True, block_m=BLOCK, block_n=BLOCK).backward(do)
+    dq_t, dk_t, dv_t = q.grad.detach().clone(), k.grad.detach().clone(), v.grad.detach().clone()
+    q.grad = k.grad = v.grad = None
+
+    F.scaled_dot_product_attention(q, k, v, is_causal=True).backward(do)
+    dq_s, dk_s, dv_s = q.grad.detach(), k.grad.detach(), v.grad.detach()
+
+    torch.testing.assert_close(dq_t, dq_s, atol=2e-4, rtol=2e-4)
+    torch.testing.assert_close(dk_t, dk_s, atol=2e-4, rtol=2e-4)
+    torch.testing.assert_close(dv_t, dv_s, atol=2e-4, rtol=2e-4)

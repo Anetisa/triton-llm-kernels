@@ -24,6 +24,7 @@ from .layernorm import (
 )
 from .flash_attention import (
     attention_reference,
+    flash_attention,
     flash_attention_forward,
 )
 
@@ -43,7 +44,8 @@ __all__ = [
     "layernorm_reference",
     "TritonLayerNorm",
     "flash_attention_forward",
+    "flash_attention",
     "attention_reference",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

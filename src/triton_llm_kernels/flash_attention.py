@@ -10,9 +10,14 @@ a running max `m`, running normalizer `l`, and running output `acc` — rescalin
 `acc` and `l` by `exp(m_old − m_new)` as the max grows. Memory drops from O(S²)
 to O(S), and the whole thing stays in registers/SRAM.
 
-This module implements the **forward** pass (inference). Backward is a separate,
-larger follow-up. Layout is [B, H, S, D]; scale defaults to 1/√D; causal masking
-is supported.
+This module implements **forward and backward** (training-ready). Layout is
+[B, H, S, D]; scale defaults to 1/√D; causal masking is supported.
+
+The backward reuses the saved log-sum-exp `L` from the forward to recompute `P`
+on the fly, and uses the identity `delta_i = Σ_d O_id·dO_id` to collapse the
+softmax-gradient term. It runs as three passes with no atomics: a delta
+preprocess, a dQ kernel parallelized over query blocks, and a dK/dV kernel
+parallelized over key/value blocks.
 
 Online-softmax recurrence (per query row, per key block s_j):
     m_new = max(m, rowmax(s_j))
@@ -65,11 +70,12 @@ if HAS_TRITON:
 
     @triton.jit
     def _flash_fwd_kernel(
-        Q, K, V, O,
+        Q, K, V, O, L,
         stride_qbh, stride_qs, stride_qd,
         stride_kbh, stride_ks, stride_kd,
         stride_vbh, stride_vs, stride_vd,
         stride_obh, stride_os, stride_od,
+        stride_lbh, stride_ls,
         S, scale,
         CAUSAL: tl.constexpr,
         BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, D: tl.constexpr,
@@ -127,21 +133,211 @@ if HAS_TRITON:
         o_ptrs = o_base + offs_m[:, None] * stride_os + offs_d[None, :] * stride_od
         tl.store(o_ptrs, out.to(O.dtype.element_ty), mask=q_mask)
 
+        # save log-sum-exp per query row (L = m + log l), needed by the backward
+        l_ptrs = L + bh * stride_lbh + offs_m * stride_ls
+        L_row = m_i + tl.log(l_i)
+        tl.store(l_ptrs, L_row, mask=offs_m < S)
 
-def flash_attention_forward(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    causal: bool = True,
-    scale: float | None = None,
-    block_m: int = 64,
-    block_n: int = 64,
-) -> torch.Tensor:
-    """FlashAttention forward. q,k,v: [B, H, S, D]. Returns [B, H, S, D].
 
-    Forward/inference only for now (no autograd). Requires a CUDA tensor, or
-    TRITON_INTERPRET=1 for CPU debugging.
-    """
+    # ----------------------------------------------------------------------- #
+    # Backward kernels                                                        #
+    # ----------------------------------------------------------------------- #
+    @triton.jit
+    def _bwd_preprocess_kernel(
+        O, DO, Delta,
+        stride_obh, stride_os, stride_od,
+        stride_dbh, stride_ds,
+        S, BLOCK_M: tl.constexpr, D: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        bh = tl.program_id(1)
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_d = tl.arange(0, D)
+        mask = offs_m[:, None] < S
+
+        o = tl.load(O + bh * stride_obh + offs_m[:, None] * stride_os + offs_d[None, :] * stride_od,
+                    mask=mask, other=0.0).to(tl.float32)
+        do = tl.load(DO + bh * stride_obh + offs_m[:, None] * stride_os + offs_d[None, :] * stride_od,
+                     mask=mask, other=0.0).to(tl.float32)
+        delta = tl.sum(o * do, axis=1)                      # per-row scalar
+        tl.store(Delta + bh * stride_dbh + offs_m * stride_ds, delta, mask=offs_m < S)
+
+    @triton.jit
+    def _bwd_dq_kernel(
+        Q, K, V, DO, DQ, L, Delta,
+        stride_qbh, stride_qs, stride_qd,
+        stride_lbh, stride_ls,
+        S, scale, CAUSAL: tl.constexpr,
+        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, D: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)          # query block -> owns dQ rows (no atomics)
+        bh = tl.program_id(1)
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_d = tl.arange(0, D)
+        q_base = Q + bh * stride_qbh
+        k_base = K + bh * stride_qbh
+        v_base = V + bh * stride_qbh
+        do_base = DO + bh * stride_qbh
+
+        m_mask = offs_m[:, None] < S
+        q = tl.load(q_base + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd,
+                    mask=m_mask, other=0.0).to(tl.float32)
+        do = tl.load(do_base + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd,
+                     mask=m_mask, other=0.0).to(tl.float32)
+        L_i = tl.load(L + bh * stride_lbh + offs_m * stride_ls, mask=offs_m < S, other=0.0)
+        delta_i = tl.load(Delta + bh * stride_lbh + offs_m * stride_ls, mask=offs_m < S, other=0.0)
+
+        dq = tl.zeros((BLOCK_M, D), tl.float32)
+        hi = (pid_m + 1) * BLOCK_M if CAUSAL else S
+        for start_n in range(0, hi, BLOCK_N):
+            offs_n = start_n + tl.arange(0, BLOCK_N)
+            n_mask = offs_n[:, None] < S
+            k = tl.load(k_base + offs_n[:, None] * stride_qs + offs_d[None, :] * stride_qd,
+                        mask=n_mask, other=0.0).to(tl.float32)
+            v = tl.load(v_base + offs_n[:, None] * stride_qs + offs_d[None, :] * stride_qd,
+                        mask=n_mask, other=0.0).to(tl.float32)
+            qk = tl.dot(q, tl.trans(k)) * scale
+            valid = offs_n[None, :] < S
+            if CAUSAL:
+                valid = valid & (offs_m[:, None] >= offs_n[None, :])
+            p = tl.where(valid, tl.exp(qk - L_i[:, None]), 0.0)
+            dp = tl.dot(do, tl.trans(v))                    # dO_i · V_j
+            ds = p * (dp - delta_i[:, None])
+            dq += scale * tl.dot(ds.to(k.dtype), k)
+        tl.store(DQ + bh * stride_qbh + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd,
+                 dq.to(DQ.dtype.element_ty), mask=m_mask)
+
+    @triton.jit
+    def _bwd_dkv_kernel(
+        Q, K, V, DO, DK, DV, L, Delta,
+        stride_qbh, stride_qs, stride_qd,
+        stride_lbh, stride_ls,
+        S, scale, CAUSAL: tl.constexpr,
+        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, D: tl.constexpr,
+    ):
+        pid_n = tl.program_id(0)          # kv block -> owns dK,dV rows (no atomics)
+        bh = tl.program_id(1)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_d = tl.arange(0, D)
+        q_base = Q + bh * stride_qbh
+        k_base = K + bh * stride_qbh
+        v_base = V + bh * stride_qbh
+        do_base = DO + bh * stride_qbh
+
+        n_mask = offs_n[:, None] < S
+        k = tl.load(k_base + offs_n[:, None] * stride_qs + offs_d[None, :] * stride_qd,
+                    mask=n_mask, other=0.0).to(tl.float32)
+        v = tl.load(v_base + offs_n[:, None] * stride_qs + offs_d[None, :] * stride_qd,
+                    mask=n_mask, other=0.0).to(tl.float32)
+
+        dk = tl.zeros((BLOCK_N, D), tl.float32)
+        dv = tl.zeros((BLOCK_N, D), tl.float32)
+
+        # causal: only query blocks with i >= this kv block contribute
+        lo = pid_n * BLOCK_N if CAUSAL else 0
+        lo = (lo // BLOCK_M) * BLOCK_M
+        for start_m in range(lo, S, BLOCK_M):
+            offs_m = start_m + tl.arange(0, BLOCK_M)
+            m_mask = offs_m[:, None] < S
+            q = tl.load(q_base + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd,
+                        mask=m_mask, other=0.0).to(tl.float32)
+            do = tl.load(do_base + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd,
+                         mask=m_mask, other=0.0).to(tl.float32)
+            L_i = tl.load(L + bh * stride_lbh + offs_m * stride_ls, mask=offs_m < S, other=0.0)
+            delta_i = tl.load(Delta + bh * stride_lbh + offs_m * stride_ls, mask=offs_m < S, other=0.0)
+
+            qk = tl.dot(q, tl.trans(k)) * scale             # [BLOCK_M, BLOCK_N]
+            valid = (offs_n[None, :] < S) & (offs_m[:, None] < S)
+            if CAUSAL:
+                valid = valid & (offs_m[:, None] >= offs_n[None, :])
+            p = tl.where(valid, tl.exp(qk - L_i[:, None]), 0.0)   # [BLOCK_M, BLOCK_N]
+
+            dv += tl.dot(tl.trans(p).to(do.dtype), do)      # P^T @ dO
+            dp = tl.dot(do, tl.trans(v))                    # [BLOCK_M, BLOCK_N]
+            ds = p * (dp - delta_i[:, None])
+            dk += scale * tl.dot(tl.trans(ds).to(q.dtype), q)
+
+        tl.store(DK + bh * stride_qbh + offs_n[:, None] * stride_qs + offs_d[None, :] * stride_qd,
+                 dk.to(DK.dtype.element_ty), mask=n_mask)
+        tl.store(DV + bh * stride_qbh + offs_n[:, None] * stride_qs + offs_d[None, :] * stride_qd,
+                 dv.to(DV.dtype.element_ty), mask=n_mask)
+
+
+def _flash_forward_impl(q, k, v, causal, scale, block_m, block_n):
+    """Run the forward kernel, returning (o, L). Internal; assumes contiguous."""
+    B, H, S, D = q.shape
+    o = torch.empty_like(q)
+    L = torch.empty((B * H, S), dtype=torch.float32, device=q.device)
+    qf = q.view(B * H, S, D); kf = k.view(B * H, S, D)
+    vf = v.view(B * H, S, D); of = o.view(B * H, S, D)
+    grid = (triton.cdiv(S, block_m), B * H)
+    _flash_fwd_kernel[grid](
+        qf, kf, vf, of, L,
+        qf.stride(0), qf.stride(1), qf.stride(2),
+        kf.stride(0), kf.stride(1), kf.stride(2),
+        vf.stride(0), vf.stride(1), vf.stride(2),
+        of.stride(0), of.stride(1), of.stride(2),
+        L.stride(0), L.stride(1),
+        S, scale, CAUSAL=causal,
+        BLOCK_M=block_m, BLOCK_N=block_n, D=D,
+    )
+    return o, L
+
+
+if HAS_TRITON:
+
+    class _FlashAttnFn(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, q, k, v, causal, scale, block_m, block_n):
+            q = q.contiguous(); k = k.contiguous(); v = v.contiguous()
+            o, L = _flash_forward_impl(q, k, v, causal, scale, block_m, block_n)
+            ctx.save_for_backward(q, k, v, o, L)
+            ctx.causal = causal; ctx.scale = scale
+            ctx.block_m = block_m; ctx.block_n = block_n
+            return o
+
+        @staticmethod
+        def backward(ctx, do):
+            q, k, v, o, L = ctx.saved_tensors
+            B, H, S, D = q.shape
+            causal, scale = ctx.causal, ctx.scale
+            block_m, block_n = ctx.block_m, ctx.block_n
+            do = do.contiguous()
+
+            dq = torch.empty_like(q); dk = torch.empty_like(k); dv = torch.empty_like(v)
+            delta = torch.empty((B * H, S), dtype=torch.float32, device=q.device)
+
+            qf = q.view(B * H, S, D); kf = k.view(B * H, S, D); vf = v.view(B * H, S, D)
+            of = o.view(B * H, S, D); dof = do.view(B * H, S, D)
+            dqf = dq.view(B * H, S, D); dkf = dk.view(B * H, S, D); dvf = dv.view(B * H, S, D)
+
+            # 1) delta_i = rowsum(dO_i * O_i)
+            _bwd_preprocess_kernel[(triton.cdiv(S, block_m), B * H)](
+                of, dof, delta,
+                of.stride(0), of.stride(1), of.stride(2),
+                delta.stride(0), delta.stride(1),
+                S, BLOCK_M=block_m, D=D,
+            )
+            # 2) dQ (parallel over query blocks)
+            _bwd_dq_kernel[(triton.cdiv(S, block_m), B * H)](
+                qf, kf, vf, dof, dqf, L, delta,
+                qf.stride(0), qf.stride(1), qf.stride(2),
+                L.stride(0), L.stride(1),
+                S, scale, CAUSAL=causal,
+                BLOCK_M=block_m, BLOCK_N=block_n, D=D,
+            )
+            # 3) dK, dV (parallel over kv blocks)
+            _bwd_dkv_kernel[(triton.cdiv(S, block_n), B * H)](
+                qf, kf, vf, dof, dkf, dvf, L, delta,
+                qf.stride(0), qf.stride(1), qf.stride(2),
+                L.stride(0), L.stride(1),
+                S, scale, CAUSAL=causal,
+                BLOCK_M=block_m, BLOCK_N=block_n, D=D,
+            )
+            return dq, dk, dv, None, None, None, None
+
+
+def _prepare(q, k, v, causal, scale, block_m, block_n):
     if not HAS_TRITON:
         raise RuntimeError(
             "Triton is not installed. Use attention_reference() on CPU, or install "
@@ -150,35 +346,28 @@ def flash_attention_forward(
     interpret = os.environ.get("TRITON_INTERPRET") == "1"
     if not q.is_cuda and not interpret:
         raise RuntimeError(
-            "flash_attention_forward() runs a Triton GPU kernel and needs a CUDA "
-            "tensor. For CPU debugging use attention_reference(), or set "
-            "TRITON_INTERPRET=1."
+            "flash_attention runs a Triton GPU kernel and needs a CUDA tensor. "
+            "For CPU debugging use attention_reference(), or set TRITON_INTERPRET=1."
         )
-
     B, H, S, D = q.shape
     assert k.shape == v.shape == (B, H, S, D), "q, k, v must share shape [B,H,S,D]"
     scale = scale if scale is not None else 1.0 / math.sqrt(D)
+    return scale
 
-    q = q.contiguous()
-    k = k.contiguous()
-    v = v.contiguous()
-    o = torch.empty_like(q)
 
-    # flatten (B, H) -> BH so the kernel indexes heads with a single stride
-    qf = q.view(B * H, S, D)
-    kf = k.view(B * H, S, D)
-    vf = v.view(B * H, S, D)
-    of = o.view(B * H, S, D)
+def flash_attention(q, k, v, causal=True, scale=None, block_m=64, block_n=64):
+    """Differentiable FlashAttention (forward + backward). q,k,v: [B, H, S, D].
 
-    grid = (triton.cdiv(S, block_m), B * H)
-    _flash_fwd_kernel[grid](
-        qf, kf, vf, of,
-        qf.stride(0), qf.stride(1), qf.stride(2),
-        kf.stride(0), kf.stride(1), kf.stride(2),
-        vf.stride(0), vf.stride(1), vf.stride(2),
-        of.stride(0), of.stride(1), of.stride(2),
-        S, scale,
-        CAUSAL=causal,
-        BLOCK_M=block_m, BLOCK_N=block_n, D=D,
-    )
+    Supports autograd for dQ, dK, dV. Requires a CUDA tensor, or
+    TRITON_INTERPRET=1 for CPU debugging.
+    """
+    scale = _prepare(q, k, v, causal, scale, block_m, block_n)
+    return _FlashAttnFn.apply(q, k, v, causal, scale, block_m, block_n)
+
+
+def flash_attention_forward(q, k, v, causal=True, scale=None, block_m=64, block_n=64):
+    """Forward-only FlashAttention (no autograd graph). q,k,v: [B, H, S, D]."""
+    scale = _prepare(q, k, v, causal, scale, block_m, block_n)
+    q = q.contiguous(); k = k.contiguous(); v = v.contiguous()
+    o, _ = _flash_forward_impl(q, k, v, causal, scale, block_m, block_n)
     return o

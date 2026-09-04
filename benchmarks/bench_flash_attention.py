@@ -18,7 +18,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-from triton_llm_kernels import flash_attention_forward
+from triton_llm_kernels import flash_attention, flash_attention_forward
 
 try:
     import triton
@@ -40,22 +40,32 @@ def naive_attention(q, k, v, causal=True):
     return torch.matmul(torch.softmax(s, dim=-1), v)
 
 
-def run(B, H, D, seq_lens, dtype, provider, causal=True):
+def run(B, H, D, seq_lens, dtype, provider, causal=True, backward=False):
     do_bench = triton.testing.do_bench
     results = []
     for S in seq_lens:
-        q = torch.randn(B, H, S, D, device="cuda", dtype=dtype)
-        k = torch.randn(B, H, S, D, device="cuda", dtype=dtype)
-        v = torch.randn(B, H, S, D, device="cuda", dtype=dtype)
+        q = torch.randn(B, H, S, D, device="cuda", dtype=dtype, requires_grad=backward)
+        k = torch.randn(B, H, S, D, device="cuda", dtype=dtype, requires_grad=backward)
+        v = torch.randn(B, H, S, D, device="cuda", dtype=dtype, requires_grad=backward)
+        do = torch.randn(B, H, S, D, device="cuda", dtype=dtype)
 
         if provider == "naive":
-            fn = lambda: naive_attention(q, k, v, causal)
+            fwd = lambda: naive_attention(q, k, v, causal)
         elif provider == "sdpa":
-            fn = lambda: F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+            fwd = lambda: F.scaled_dot_product_attention(q, k, v, is_causal=causal)
         elif provider == "triton":
-            fn = lambda: flash_attention_forward(q, k, v, causal=causal)
+            fwd = (lambda: flash_attention(q, k, v, causal=causal)) if backward \
+                else (lambda: flash_attention_forward(q, k, v, causal=causal))
         else:
             raise ValueError(provider)
+
+        if backward:
+            def step():
+                o = fwd()
+                o.backward(do, retain_graph=True)
+            fn = step
+        else:
+            fn = fwd
 
         try:
             ms = do_bench(fn, warmup=25, rep=50)

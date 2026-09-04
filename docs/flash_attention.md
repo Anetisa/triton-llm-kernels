@@ -71,11 +71,56 @@ and PyTorch's `scaled_dot_product_attention` — for causal and non-causal, fp32
 and fp16, and sequence lengths that are not multiples of the block size. The
 online-softmax recurrence itself is verified against plain attention to fp64.
 
+## Backward
+
+Given `dO`, we need `dQ`, `dK`, `dV`. The backward reuses two tricks so it never
+stores `P` or the `S×S` matrix either:
+
+**Recompute P from L.** The forward saves `L_i = m_i + log(l_i)` (the log-sum-exp
+per query row). Then `P_ij = exp(scale·q_i·k_j − L_i)` is recomputed block-by-block
+— no need to have kept `P`.
+
+**The delta identity.** The softmax gradient needs
+`Σ_j P_ij·dP_ij`. Substituting `dP_ij = dO_i·V_j` collapses this to a cheap
+per-row scalar:
+
+    delta_i = Σ_j P_ij (dO_i·V_j) = dO_i · O_i = Σ_d O_id·dO_id
+
+So a small preprocess pass computes `delta = rowsum(O ⊙ dO)`. Then, per block:
+
+    P    = exp(scale·Q·Kᵀ − L)          # recomputed
+    dV  += Pᵀ · dO
+    dP   = dO · Vᵀ
+    dS   = P ⊙ (dP − delta)
+    dQ  += scale · dS · K
+    dK  += scale · dSᵀ · Q
+
+**No atomics.** Rather than one pass with atomic accumulation, the backward runs
+as two independent kernels that each *own* their output rows:
+
+- **dQ kernel** — one program per query block, loops over key blocks (up to the
+  causal diagonal). Each program writes its own `dQ` rows.
+- **dK/dV kernel** — one program per key/value block, loops over query blocks
+  (from the causal diagonal onward). Each program writes its own `dK`, `dV` rows.
+
+This trades a little recompute (P is formed twice) for fully deterministic,
+atomic-free accumulation — clean and easy to verify.
+
+## Correctness
+
+Forward is checked against a hand reference and PyTorch's
+`scaled_dot_product_attention`. Backward is validated three ways: the full
+formula set matches autograd to fp64 precision in the derivation; the kernel's
+`dQ/dK/dV` match autograd through both the reference and SDPA to fp32 precision
+across causal/non-causal and ragged sequence lengths. (`torch.autograd.gradcheck`
+is not used as a gate because the kernel accumulates in fp32, which makes
+fp64 finite-difference checking unreliable — expected, not a bug.)
+
 ## Scope and roadmap
 
-This is the **forward** pass (inference). Next steps, each a separate addition:
+Forward + backward are done (training-ready). Next:
 
-- **Backward** — the larger follow-up; needs the saved log-sum-exp per row and a
-  second pass (dQ, dK, dV).
 - **GQA / MQA** — fewer KV heads than Q heads (broadcast KV across query groups).
-- **Autotuning** `BLOCK_M`/`BLOCK_N` per head dim, and a non-power-of-two `D` path.
+- **One-pass backward** with atomic dQ accumulation (less recompute), and
+  autotuned `BLOCK_M`/`BLOCK_N` per head dim.
+- Non-power-of-two `D` and a dropout path.
