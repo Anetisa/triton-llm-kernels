@@ -149,3 +149,44 @@ def test_backward_matches_sdpa():
     torch.testing.assert_close(dq_t, dq_s, atol=2e-4, rtol=2e-4)
     torch.testing.assert_close(dk_t, dk_s, atol=2e-4, rtol=2e-4)
     torch.testing.assert_close(dv_t, dv_s, atol=2e-4, rtol=2e-4)
+
+
+# --------------------------------------------------------------------------- #
+# GQA / MQA: fewer KV heads than Q heads                                       #
+# --------------------------------------------------------------------------- #
+# (B, H, H_kv, S, D): GQA (group=2,3), MQA (H_kv=1), and MHA (H_kv=H) as control
+GQA_SHAPES = [(1, 4, 2, 64, 64), (2, 6, 2, 96, 32), (1, 4, 1, 64, 64), (1, 4, 4, 64, 64)]
+
+
+@requires_cuda
+@pytest.mark.parametrize("B,H,H_kv,S,D", GQA_SHAPES)
+@pytest.mark.parametrize("causal", [True, False])
+def test_gqa_forward_matches_reference(B, H, H_kv, S, D, causal):
+    torch.manual_seed(0)
+    q = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float32)
+    k = torch.randn(B, H_kv, S, D, device=DEVICE, dtype=torch.float32)
+    v = torch.randn(B, H_kv, S, D, device=DEVICE, dtype=torch.float32)
+    out = flash_attention_forward(q, k, v, causal=causal, block_m=BLOCK, block_n=BLOCK)
+    ref = attention_reference(q, k, v, causal=causal)
+    torch.testing.assert_close(out, ref, atol=2e-4, rtol=2e-4)
+
+
+@requires_cuda
+@pytest.mark.parametrize("B,H,H_kv,S,D", GQA_SHAPES)
+@pytest.mark.parametrize("causal", [True, False])
+def test_gqa_backward_matches_reference(B, H, H_kv, S, D, causal):
+    """dK/dV for each KV head must sum contributions from its whole query group."""
+    torch.manual_seed(0)
+    q = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float32, requires_grad=True)
+    k = torch.randn(B, H_kv, S, D, device=DEVICE, dtype=torch.float32, requires_grad=True)
+    v = torch.randn(B, H_kv, S, D, device=DEVICE, dtype=torch.float32, requires_grad=True)
+    do = torch.randn(B, H, S, D, device=DEVICE, dtype=torch.float32)
+
+    flash_attention(q, k, v, causal=causal, block_m=BLOCK, block_n=BLOCK).backward(do)
+    dq_t, dk_t, dv_t = q.grad.clone(), k.grad.clone(), v.grad.clone()
+    q.grad = k.grad = v.grad = None
+
+    attention_reference(q, k, v, causal=causal).backward(do)
+    torch.testing.assert_close(dq_t, q.grad, atol=2e-4, rtol=2e-4)
+    torch.testing.assert_close(dk_t, k.grad, atol=2e-4, rtol=2e-4)
+    torch.testing.assert_close(dv_t, v.grad, atol=2e-4, rtol=2e-4)

@@ -116,11 +116,29 @@ across causal/non-causal and ragged sequence lengths. (`torch.autograd.gradcheck
 is not used as a gate because the kernel accumulates in fp32, which makes
 fp64 finite-difference checking unreliable — expected, not a bug.)
 
+## GQA / MQA
+
+Modern large models (LLaMA-2 70B, Mistral) don't give every query head its own
+K/V. Instead `H_kv < H` key/value heads are **shared**: query head `h` uses KV
+head `h // (H / H_kv)`. This shrinks the KV cache — the dominant memory cost at
+inference — by the group factor. MQA (`H_kv = 1`) is the extreme; MHA
+(`H_kv = H`) is the no-sharing case. Both fall out of the same code.
+
+In the kernels this is a head-index remap plus one structural change:
+
+- **Forward & dQ** — cheap: each query head just computes its shared KV head and
+  reads that K/V slice. One extra index calculation, no new loops.
+- **dK / dV** — needs care: a shared KV head accumulates gradient from *every*
+  query head in its group. So the dK/dV kernel is parallelized over **KV heads**
+  (not query heads), with an inner loop over the `GROUP = H / H_kv` query heads
+  that map to it. Each program still owns its output rows, so the scheme stays
+  atomic-free. Validated against autograd for MHA, GQA (several group sizes) and
+  MQA.
+
 ## Scope and roadmap
 
-Forward + backward are done (training-ready). Next:
+Forward + backward + GQA/MQA are done (training-ready). Next:
 
-- **GQA / MQA** — fewer KV heads than Q heads (broadcast KV across query groups).
 - **One-pass backward** with atomic dQ accumulation (less recompute), and
   autotuned `BLOCK_M`/`BLOCK_N` per head dim.
 - Non-power-of-two `D` and a dropout path.

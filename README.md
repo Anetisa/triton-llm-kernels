@@ -158,8 +158,9 @@ state.
 - [x] **RMSNorm** forward + backward, tests, benchmark, [write-up](docs/rmsnorm.md)
 - [x] **RoPE** (rotary embeddings) forward + backward, tests, benchmark, [write-up](docs/rope.md)
 - [x] **SwiGLU** fused activation forward + backward, tests, benchmark, [write-up](docs/swiglu.md)
-- [ ] LayerNorm (with bias) + grouped/locked weight-grad reduction
-- [ ] **FlashAttention**: online-softmax, causal mask, GQA/MQA
+- [x] **LayerNorm** (with bias) + grouped/locked weight-grad reduction, tests, [write-up](docs/layernorm.md) — benchmark pending a GPU run
+- [x] **FlashAttention (forward + backward)**: online-softmax, causal mask, dQ/dK/dV, tests vs SDPA + autograd, [write-up](docs/flash_attention.md) — benchmark pending a GPU run
+- [x] FlashAttention **GQA/MQA** (fewer KV heads than Q heads; dK/dV sums each query group)
 - [ ] FP8 GEMM using Ada-native FP8 tensor cores (RTX 4090+)
 - [ ] Autotuning configs + a short blog-style write-up per kernel
 
