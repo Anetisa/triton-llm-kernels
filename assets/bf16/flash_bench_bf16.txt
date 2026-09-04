@@ -1,0 +1,12 @@
+
+FlashAttention fwd (causal)  |  B=4 H=32 D=64  dtype=bf16  GPU=NVIDIA GeForce RTX 4090
+
+     S |   naive ms   sdpa ms  triton ms |  vs naive
+----------------------------------------------------
+   512 |     0.7630    0.0804     0.0654 |    11.67x
+  1024 |     3.0995    0.1712     0.1654 |    18.74x
+  2048 |    14.3985    0.5204     0.5625 |    25.59x
+  4096 |    49.0127    1.8396     2.1002 |    23.34x
+  8192 |        nan    6.9681     8.1590 |       OOM
+
+Saved plot -> assets/bf16/flash_bench_bf16.png
