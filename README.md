@@ -17,7 +17,7 @@ The normalization, positional-encoding and MLP ops inside a transformer are *mem
 | SwiGLU MLP | ✅ | ✅ | ✅ | ✅ | fused SiLU(gate)·up |
 | LayerNorm | ✅ | ✅ | ✅ | ✅| with bias; lock-grouped weight-grad reduction  |
 | FlashAttention | ✅ | ✅ | ✅ | ✅ | online-softmax, causal, fwd+bwd, GQA/MQA |
-| FP8 GEMM | planned | — | | | Ada-native FP8 (4090+) |
+| FP8 GEMM | ✅ | — | ✅ | in progress | Ada-native FP8, per-tensor scaling |
 
 ## Why this is memory-bound (and why fusion wins)
 
@@ -215,7 +215,7 @@ state.
 - [x] **LayerNorm** (with bias) + grouped/locked weight-grad reduction, tests, benchmark, [write-up](docs/layernorm.md)
 - [x] **FlashAttention** forward + backward (dQ/dK/dV), causal, online-softmax, tests vs SDPA + autograd, benchmark, write-up
 - [x] **FlashAttention GQA/MQA** (fewer KV heads than Q heads; dK/dV sums each query group)
-- [ ] FP8 GEMM using Ada-native FP8 tensor cores (RTX 4090+)
+- [x] **FP8 GEMM** on Ada-native FP8 tensor cores, per-tensor scaling, norm-based tests, [write-up](docs/fp8_gemm.md)
 - [ ] Autotuning configs + a short blog-style write-up per kernel
 
 ## References

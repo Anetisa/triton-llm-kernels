@@ -27,6 +27,11 @@ from .flash_attention import (
     flash_attention,
     flash_attention_forward,
 )
+from .fp8_gemm import (
+    fp8_gemm,
+    gemm_reference,
+    quantize_fp8,
+)
 
 __all__ = [
     "rmsnorm",
@@ -46,6 +51,9 @@ __all__ = [
     "flash_attention_forward",
     "flash_attention",
     "attention_reference",
+    "fp8_gemm",
+    "gemm_reference",
+    "quantize_fp8",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
