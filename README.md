@@ -1,10 +1,10 @@
 # triton-llm-kernels
 
-**Fused [Triton](https://github.com/triton-lang/triton) kernels for the building blocks of modern LLMs — written from scratch, tested against PyTorch, and and benchmarked on an RTX 4090.**
+**Fused [Triton](https://github.com/triton-lang/triton) kernels for the building blocks of modern LLMs — written from scratch, tested against PyTorch, and benchmarked on an RTX 4090.**
 
-The normalization, positional-encoding and MLP ops inside a transformer are *memory-bound*: the math per element is cheap, so runtime is dominated by moving tensors in and out of GPU memory. Writing them as naive eager PyTorch pays for multiple passes over memory plus a kernel launch per op. This repo reimplements them as **single fused Triton kernels** — one load, one store, math in registers — and adds a from-scratch **FlashAttention** (forward + backward, causal, GQA/MQA) as the headliner.
+The normalization, positional-encoding and MLP ops inside a transformer are *memory-bound*: the math per element is cheap, so runtime is dominated by moving tensors in and out of GPU memory. Writing them as naive eager PyTorch pays for multiple passes over memory plus a kernel launch per op. This repo reimplements them as **single fused Triton kernels** — one load, one store, math in registers — and adds a from-scratch **FlashAttention** (forward + backward, causal, GQA/MQA) and an **FP8 GEMM** as the headliners.
 
-> Built as a hands-on study of GPU kernel programming for LLM inference and training. Every kernel comes with a correctness test against a PyTorch reference and a reproducible benchmark.
+> Built as a hands-on study of GPU kernel programming for LLM inference and training. Every kernel comes with a correctness test against a PyTorch reference and a reproducible benchmark. It's also designed to be developed **without a local GPU** — see below.
 
 ---
 
@@ -13,25 +13,18 @@ The normalization, positional-encoding and MLP ops inside a transformer are *mem
 | Kernel | Fwd | Bwd | Correctness test | Benchmark | Notes |
 |---|:---:|:---:|:---:|:---:|---|
 | **RMSNorm** | ✅ | ✅ | ✅ | ✅ | LLaMA/Mistral/Qwen norm |
-| RoPE | ✅ | ✅ | ✅ | ✅ | rotary position embedding (rotate_half) |
-| SwiGLU MLP | ✅ | ✅ | ✅ | ✅ | fused SiLU(gate)·up |
-| LayerNorm | ✅ | ✅ | ✅ | ✅| with bias; lock-grouped weight-grad reduction  |
-| FlashAttention | ✅ | ✅ | ✅ | ✅ | online-softmax, causal, fwd+bwd, GQA/MQA |
-| FP8 GEMM | ✅ | — | ✅ | in progress | Ada-native FP8, per-tensor scaling |
+| **RoPE** | ✅ | ✅ | ✅ | ✅ | rotary position embedding (rotate_half) |
+| **SwiGLU MLP** | ✅ | ✅ | ✅ | ✅ | fused SiLU(gate) * up |
+| **LayerNorm** | ✅ | ✅ | ✅ | ✅| with bias; lock-grouped weight-grad reduction  |
+| **FlashAttention** | ✅ | ✅ | ✅ | ✅ | online-softmax, causal, fwd+bwd, GQA/MQA |
+| **FP8 GEMM** | ✅ | — | ✅ | ✅ | Ada-native FP8, per-tensor scaling |
 
-## Why this is memory-bound (and why fusion wins)
+## Why memory-bound — and the compute-bound exceptions
 
-
-For RMSNorm on an `[M, N]` tensor you must read `M·N` elements and write `M·N`
-back. That's the floor. Eager PyTorch does extra round-trips (squaring, mean,
-rsqrt, multiply) and launches several kernels. The fused kernel hits the floor:
-each row is read once into registers, normalized, and written once. The right
-metric is therefore **effective bandwidth (GB/s)** — how close we get to the
-GPU's peak — not FLOP/s.
-
-Attention is the exception: it's **compute-bound** (dominated by matmuls on the
-Tensor Cores), so FlashAttention is measured by latency against PyTorch's SDPA
-rather than by bandwidth.
+For RMSNorm on an `[M, N]` tensor you must read `M·N` elements and write `M·N` back. That's the floor. Eager PyTorch does extra round-trips (squaring, mean, rsqrt, multiply) and launches several kernels. The fused kernel hits the floor: each row is read once into registers, normalized, and written once. The right metric for these ops is therefore **effective bandwidth (GB/s)** — how close we get to the GPU's peak — not FLOP/s.
+   
+Two kernels are the exception. **FlashAttention** and **FP8 GEMM** are
+**compute-bound** (dominated by matmuls on the Tensor Cores), so they're measured by latency / TFLOP/s against PyTorch's SDPA and cuBLAS rather than by bandwidth.
 
 ## Results
 
@@ -131,11 +124,35 @@ FlashAttention fwd (causal)  |  B=4 H=32 D=64  dtype=fp16  GPU=NVIDIA GeForce RT
   8192 |        OOM     7.0200     8.2393 |      n/a
 ```
 
+### FP8 GEMM
+
+The only compute-bound kernel here. FP8 matmul competes with cuBLAS, so the
+metric is TFLOP/s. A straightforward tiled kernel reaches **~107 TFLOP/s** on
+large matrices — below cuBLAS fp16 (~165 TFLOP/s), because it has no software
+pipelining, autotuning, or optimized layout. The point is to exercise Ada's FP8
+tensor cores correctly (per-tensor scaling, fp32 accumulation, ~3.7% Frobenius
+error — expected for e4m3), not to beat cuBLAS; the speedups come from the
+optimizations in the roadmap.
+
+![FP8 GEMM benchmark](assets/fp8_gemm_bench.png)
+
+```
+FP8 GEMM (square M=N=K)  |  GPU=NVIDIA GeForce RTX 4090
+
+  size |   fp16 ms    fp8 ms |  fp16 TFLOP/s  fp8 TFLOP/s
+---------------------------------------------------------
+   512 |    0.0113    0.1557 |          23.8          1.7
+  1024 |    0.0333    0.1672 |          64.6         12.8
+  2048 |    0.1150    0.3182 |         149.4         54.0
+  4096 |    0.7967    1.6315 |         172.5         84.2
+  8192 |    6.6712   10.2431 |         164.8        107.3
+```
+
 ## Quickstart
 
 ```python
 import torch
-from triton_llm_kernels import rmsnorm, TritonRMSNorm, flash_attention
+from triton_llm_kernels import rmsnorm, TritonRMSNorm, flash_attention, fp8_gemm
 
 # --- a fused norm (functional or as an nn.Module) ---
 x = torch.randn(8, 2048, device="cuda", dtype=torch.float16)
@@ -150,6 +167,11 @@ k = torch.randn(2,  8, 1024, 64, device="cuda", dtype=torch.float16, requires_gr
 v = torch.randn(2,  8, 1024, 64, device="cuda", dtype=torch.float16, requires_grad=True)
 out = flash_attention(q, k, v, causal=True)
 out.sum().backward()                    # dQ, dK, dV
+
+# --- FP8 GEMM on Ada FP8 tensor cores (per-tensor scaled) ---
+a = torch.randn(4096, 4096, device="cuda", dtype=torch.float16)
+b = torch.randn(4096, 4096, device="cuda", dtype=torch.float16)
+c = fp8_gemm(a, b)                      # A @ B in fp8, fp32 accumulation
 ```
 
 ### Install
@@ -180,17 +202,18 @@ make test-cpu    # runs the Triton kernels on CPU via the interpreter
 ```
 
 `make test-cpu` sets `TRITON_INTERPRET=1`, which executes the real kernel code
-(indexing, masks, reductions, `atomic_add`) on CPU tensors and checks it against
-the PyTorch reference — forward *and* backward. It's slower than a GPU but
-catches logic bugs before you ever rent one. The full suite runs in a few
-seconds.
+(indexing, masks, reductions, `atomic_add`, spin-locks, `tl.dot`, even fp8) on
+CPU tensors and checks it against the PyTorch reference — forward *and* backward.
+It's slower than a GPU but catches logic bugs before you ever rent one. The full
+suite runs in about a minute.
 
-- The **PyTorch reference** (`rmsnorm_reference`) and its **property tests** run
-  on CPU with no Triton at all, so `pytest` is never a no-op locally.
+- The **PyTorch references** and their **property tests** run on CPU with no
+  Triton at all, so `pytest` is never a no-op locally.
 - Kernel tests **skip cleanly** with no GPU present, or **run under the
   interpreter** when `TRITON_INTERPRET=1` is set.
 - Rent a GPU (e.g. an RTX 4090 by the hour) only for tuning and final
-  benchmarks — correctness is fully checkable on CPU first.
+  benchmarks — correctness is fully checkable on CPU first. Some effects are
+  hardware-only (e.g. TF32 vs IEEE fp32 in `tl.dot`); those are noted in the docs.
 
 ## Project structure
 
@@ -216,7 +239,8 @@ state.
 - [x] **FlashAttention** forward + backward (dQ/dK/dV), causal, online-softmax, tests vs SDPA + autograd, benchmark, write-up
 - [x] **FlashAttention GQA/MQA** (fewer KV heads than Q heads; dK/dV sums each query group)
 - [x] **FP8 GEMM** on Ada-native FP8 tensor cores, per-tensor scaling, norm-based tests, [write-up](docs/fp8_gemm.md)
-- [ ] Autotuning configs + a short blog-style write-up per kernel
+- [ ] Autotuning configs (block sizes, `num_stages`) + per-row/col FP8 scaling
+- [ ] A short blog-style write-up tying the kernels into one transformer block
 
 ## References
 
