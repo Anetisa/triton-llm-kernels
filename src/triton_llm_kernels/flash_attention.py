@@ -113,7 +113,7 @@ if HAS_TRITON:
         # load Q block [BLOCK_M, D]
         q_ptrs = q_base + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd
         q_mask = offs_m[:, None] < S
-        q = tl.load(q_ptrs, mask=q_mask, other=0.0).to(tl.float32)
+        q = tl.load(q_ptrs, mask=q_mask, other=0.0)
 
         m_i = tl.full((BLOCK_M,), float("-inf"), tl.float32)
         l_i = tl.zeros((BLOCK_M,), tl.float32)
@@ -126,7 +126,7 @@ if HAS_TRITON:
             offs_n = start_n + tl.arange(0, BLOCK_N)
             k_ptrs = k_base + offs_n[:, None] * stride_ks + offs_d[None, :] * stride_kd
             n_mask = offs_n[:, None] < S
-            k = tl.load(k_ptrs, mask=n_mask, other=0.0).to(tl.float32)
+            k = tl.load(k_ptrs, mask=n_mask, other=0.0)
 
             qk = tl.dot(q, tl.trans(k), input_precision="ieee") * scale        # [BLOCK_M, BLOCK_N]
 
@@ -141,7 +141,7 @@ if HAS_TRITON:
             alpha = tl.exp(m_i - m_new)
 
             v_ptrs = v_base + offs_n[:, None] * stride_vs + offs_d[None, :] * stride_vd
-            vblk = tl.load(v_ptrs, mask=n_mask, other=0.0).to(tl.float32)
+            vblk = tl.load(v_ptrs, mask=n_mask, other=0.0)
 
             l_i = l_i * alpha + tl.sum(p, axis=1)
             acc = acc * alpha[:, None] + tl.dot(p.to(vblk.dtype), vblk, input_precision="ieee")
@@ -203,9 +203,9 @@ if HAS_TRITON:
 
         m_mask = offs_m[:, None] < S
         q = tl.load(q_base + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd,
-                    mask=m_mask, other=0.0).to(tl.float32)
+                    mask=m_mask, other=0.0)
         do = tl.load(do_base + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd,
-                     mask=m_mask, other=0.0).to(tl.float32)
+                     mask=m_mask, other=0.0)
         L_i = tl.load(L + bh * stride_lbh + offs_m * stride_ls, mask=offs_m < S, other=0.0)
         delta_i = tl.load(Delta + bh * stride_lbh + offs_m * stride_ls, mask=offs_m < S, other=0.0)
 
@@ -215,9 +215,9 @@ if HAS_TRITON:
             offs_n = start_n + tl.arange(0, BLOCK_N)
             n_mask = offs_n[:, None] < S
             k = tl.load(k_base + offs_n[:, None] * stride_qs + offs_d[None, :] * stride_qd,
-                        mask=n_mask, other=0.0).to(tl.float32)
+                        mask=n_mask, other=0.0)
             v = tl.load(v_base + offs_n[:, None] * stride_qs + offs_d[None, :] * stride_qd,
-                        mask=n_mask, other=0.0).to(tl.float32)
+                        mask=n_mask, other=0.0)
             qk = tl.dot(q, tl.trans(k), input_precision="ieee") * scale
             valid = offs_n[None, :] < S
             if CAUSAL:
@@ -251,9 +251,9 @@ if HAS_TRITON:
         v_base = V + bh_kv * stride_qbh
         n_mask = offs_n[:, None] < S
         k = tl.load(k_base + offs_n[:, None] * stride_qs + offs_d[None, :] * stride_qd,
-                    mask=n_mask, other=0.0).to(tl.float32)
+                    mask=n_mask, other=0.0)
         v = tl.load(v_base + offs_n[:, None] * stride_qs + offs_d[None, :] * stride_qd,
-                    mask=n_mask, other=0.0).to(tl.float32)
+                    mask=n_mask, other=0.0)
 
         dk = tl.zeros((BLOCK_N, D), tl.float32)
         dv = tl.zeros((BLOCK_N, D), tl.float32)
@@ -270,9 +270,9 @@ if HAS_TRITON:
                 offs_m = start_m + tl.arange(0, BLOCK_M)
                 m_mask = offs_m[:, None] < S
                 q = tl.load(q_base + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd,
-                            mask=m_mask, other=0.0).to(tl.float32)
+                            mask=m_mask, other=0.0)
                 do = tl.load(do_base + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd,
-                             mask=m_mask, other=0.0).to(tl.float32)
+                             mask=m_mask, other=0.0)
                 L_i = tl.load(L + bh_q * stride_lbh + offs_m * stride_ls, mask=offs_m < S, other=0.0)
                 delta_i = tl.load(Delta + bh_q * stride_lbh + offs_m * stride_ls, mask=offs_m < S, other=0.0)
 
