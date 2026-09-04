@@ -128,7 +128,7 @@ if HAS_TRITON:
             n_mask = offs_n[:, None] < S
             k = tl.load(k_ptrs, mask=n_mask, other=0.0).to(tl.float32)
 
-            qk = tl.dot(q, tl.trans(k)) * scale        # [BLOCK_M, BLOCK_N]
+            qk = tl.dot(q, tl.trans(k), input_precision="ieee") * scale        # [BLOCK_M, BLOCK_N]
 
             # validity mask: in-range keys, and (causal) key <= query
             valid = offs_n[None, :] < S
@@ -144,7 +144,7 @@ if HAS_TRITON:
             vblk = tl.load(v_ptrs, mask=n_mask, other=0.0).to(tl.float32)
 
             l_i = l_i * alpha + tl.sum(p, axis=1)
-            acc = acc * alpha[:, None] + tl.dot(p.to(vblk.dtype), vblk)
+            acc = acc * alpha[:, None] + tl.dot(p.to(vblk.dtype), vblk, input_precision="ieee")
             m_i = m_new
 
         out = acc / l_i[:, None]
@@ -218,14 +218,14 @@ if HAS_TRITON:
                         mask=n_mask, other=0.0).to(tl.float32)
             v = tl.load(v_base + offs_n[:, None] * stride_qs + offs_d[None, :] * stride_qd,
                         mask=n_mask, other=0.0).to(tl.float32)
-            qk = tl.dot(q, tl.trans(k)) * scale
+            qk = tl.dot(q, tl.trans(k), input_precision="ieee") * scale
             valid = offs_n[None, :] < S
             if CAUSAL:
                 valid = valid & (offs_m[:, None] >= offs_n[None, :])
             p = tl.where(valid, tl.exp(qk - L_i[:, None]), 0.0)
-            dp = tl.dot(do, tl.trans(v))                    # dO_i · V_j
+            dp = tl.dot(do, tl.trans(v), input_precision="ieee")                    # dO_i · V_j
             ds = p * (dp - delta_i[:, None])
-            dq += scale * tl.dot(ds.to(k.dtype), k)
+            dq += scale * tl.dot(ds.to(k.dtype), k, input_precision="ieee")
         tl.store(DQ + bh * stride_qbh + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd,
                  dq.to(DQ.dtype.element_ty), mask=m_mask)
 
@@ -276,16 +276,16 @@ if HAS_TRITON:
                 L_i = tl.load(L + bh_q * stride_lbh + offs_m * stride_ls, mask=offs_m < S, other=0.0)
                 delta_i = tl.load(Delta + bh_q * stride_lbh + offs_m * stride_ls, mask=offs_m < S, other=0.0)
 
-                qk = tl.dot(q, tl.trans(k)) * scale             # [BLOCK_M, BLOCK_N]
+                qk = tl.dot(q, tl.trans(k), input_precision="ieee") * scale             # [BLOCK_M, BLOCK_N]
                 valid = (offs_n[None, :] < S) & (offs_m[:, None] < S)
                 if CAUSAL:
                     valid = valid & (offs_m[:, None] >= offs_n[None, :])
                 p = tl.where(valid, tl.exp(qk - L_i[:, None]), 0.0)
 
-                dv += tl.dot(tl.trans(p).to(do.dtype), do)      # P^T @ dO
-                dp = tl.dot(do, tl.trans(v))
+                dv += tl.dot(tl.trans(p).to(do.dtype), do, input_precision="ieee")      # P^T @ dO
+                dp = tl.dot(do, tl.trans(v), input_precision="ieee")
                 ds = p * (dp - delta_i[:, None])
-                dk += scale * tl.dot(tl.trans(ds).to(q.dtype), q)
+                dk += scale * tl.dot(tl.trans(ds).to(q.dtype), q, input_precision="ieee")
 
         tl.store(DK + bh_kv * stride_qbh + offs_n[:, None] * stride_qs + offs_d[None, :] * stride_qd,
                  dk.to(DK.dtype.element_ty), mask=n_mask)
